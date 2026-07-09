@@ -35,6 +35,10 @@ noValue = base.noValue
 
 SubstrateUnderrunError = error.SubstrateUnderrunError
 
+# Maximum number of octets in a long-form tag ID (20 octets = up to
+# 140-bit tag IDs)
+MAX_TAG_OCTETS = 20
+
 # Maximum nesting depth of constructed values the decoder will descend into.
 MAX_NESTING_DEPTH = 100
 
@@ -1571,7 +1575,7 @@ class SingleItemDecoder(object):
 
                     if tagId == 0x1F:
                         isShortTag = False
-                        lengthOctetIdx = 0
+                        tagOctetCount = 0
                         tagId = 0
 
                         while True:
@@ -1585,7 +1589,12 @@ class SingleItemDecoder(object):
                                 )
 
                             integerTag = ord(integerByte)
-                            lengthOctetIdx += 1
+                            tagOctetCount += 1
+                            if tagOctetCount > MAX_TAG_OCTETS:
+                                raise error.PyAsn1Error(
+                                    'Tag ID octet count exceeds limit (%d)' % (
+                                        MAX_TAG_OCTETS,)
+                                )
                             tagId <<= 7
                             tagId |= (integerTag & 0x7F)
 
