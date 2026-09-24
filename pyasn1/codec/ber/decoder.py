@@ -535,12 +535,7 @@ class RealPayloadDecoder(AbstractSimplePayloadDecoder):
 
             elif b == 2:  # encbase = 16
                 e *= 4
-            p = 0
-
-            while chunk:  # value
-                p <<= 8
-                p |= oct2int(chunk[0])
-                chunk = chunk[1:]
+            p = from_bytes(chunk)  # value
 
             if fo & 0x40:  # sign bit
                 p = -p

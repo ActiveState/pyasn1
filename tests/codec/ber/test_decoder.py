@@ -4,6 +4,7 @@
 # Copyright (c) 2005-2020, Ilya Etingof <etingof@gmail.com>
 # License: https://pyasn1.readthedocs.io/en/latest/license.html
 #
+import binascii
 import gzip
 import io
 import os
@@ -617,6 +618,16 @@ class RealDecoderTestCase(BaseTestCase):
 
         assert tuple(value) == (-1, 2, 76354972)
         assert rest == b''
+
+    def testLongBinaryMantissa(self):
+        mantissa = b'\x80' + b'\x01' * 511
+        content = b'\x80\x00' + mantissa
+        substrate = b'\x09' + encode_length(len(content)) + content
+
+        for asn1Spec in (None, univ.Real()):
+            value, rest = decoder.decode(substrate, asn1Spec=asn1Spec)
+            assert tuple(value) == (int(binascii.hexlify(mantissa), 16), 2, 0)
+            assert rest == b''
 
     def testLongFormBinaryRealExponentLength(self):
         value, rest = decoder.decode(
