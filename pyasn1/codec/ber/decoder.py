@@ -364,23 +364,20 @@ class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
         if LOG:
             LOG('assembling constructed serialization')
 
-        # All inner fragments are of the same type, treat them as octet string
-        substrateFun = self.substrateCollector
-
-        header = null
+        # Assemble the logical value of each fragment, including nested ones.
+        fragments = []
 
         original_position = substrate.tell()
         # head = popSubstream(substrate, length)
         while substrate.tell() - original_position < length:
             for component in decodeFun(
-                    substrate, self.protoComponent, substrateFun=substrateFun,
-                    **options):
+                    substrate, self.protoComponent, **options):
                 if isinstance(component, SubstrateUnderrunError):
                     yield component
 
-            header += component
+            fragments.append(component.asOctets())
 
-        yield self._createComponent(asn1Spec, tagSet, header, **options)
+        yield self._createComponent(asn1Spec, tagSet, null.join(fragments), **options)
 
     def indefLenValueDecoder(self, substrate, asn1Spec,
                              tagSet=None, length=None, state=None,
@@ -394,16 +391,13 @@ class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
 
             return
 
-        # All inner fragments are of the same type, treat them as octet string
-        substrateFun = self.substrateCollector
-
-        header = null
+        # Assemble the logical value of each fragment, including nested ones.
+        fragments = []
 
         while True:  # loop over fragments
 
             for component in decodeFun(
-                    substrate, self.protoComponent, substrateFun=substrateFun,
-                    allowEoo=True, **options):
+                    substrate, self.protoComponent, allowEoo=True, **options):
 
                 if isinstance(component, SubstrateUnderrunError):
                     yield component
@@ -414,9 +408,9 @@ class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
             if component is eoo.endOfOctets:
                 break
 
-            header += component
+            fragments.append(component.asOctets())
 
-        yield self._createComponent(asn1Spec, tagSet, header, **options)
+        yield self._createComponent(asn1Spec, tagSet, null.join(fragments), **options)
 
 
 class NullPayloadDecoder(AbstractSimplePayloadDecoder):
@@ -1378,6 +1372,8 @@ class AnyPayloadDecoder(AbstractSimplePayloadDecoder):
         # All inner fragments are of the same type, treat them as octet string
         substrateFun = self.substrateCollector
 
+        fragments = [chunk]
+
         while True:  # loop over fragments
 
             for component in decodeFun(
@@ -1393,7 +1389,9 @@ class AnyPayloadDecoder(AbstractSimplePayloadDecoder):
             if component is eoo.endOfOctets:
                 break
 
-            chunk += component
+            fragments.append(component)
+
+        chunk = null.join(fragments)
 
         if substrateFun:
             yield chunk  # TODO: Weird
