@@ -11,8 +11,7 @@ from pyasn1 0.6.2 to 0.6.5; behaviour is otherwise that of 0.5.1.
 - CVE-2026-59885 (GHSA-8ppf-4f7h-5ppj): OBJECT IDENTIFIER values are
   decoded and encoded in linear time
 - CVE-2026-59886 (GHSA-hm4w-wwcw-mr6r): Real.__float__() no longer
-  materializes huge integers for large base-10 exponents; base-10
-  mantissa normalization uses exact integer arithmetic
+  materializes huge integers for large base-10 exponents
 - CVE-2026-119194 (GHSA-fm9c-5rcf-2q5p): Bounded schemaless container
   type tracking to prevent quadratic CPU use from colliding tag IDs
 - CVE-2026-119195 (GHSA-9m75-vc3g-4x39): Constructed OCTET STRING,

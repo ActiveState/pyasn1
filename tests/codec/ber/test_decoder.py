@@ -2289,6 +2289,26 @@ class NestingDepthLimitTestCase(BaseTestCase):
         else:
             assert False, 'Deeply nested with schema not rejected'
 
+    def testCallerCannotLiftLimit(self):
+        """A caller-supplied _nestingLevel must not disable the limit."""
+        # 150 well-formed nested SEQUENCEs: decodes only if the limit is off
+        payload = ints2octs((5, 0))
+        for _ in range(150):
+            payload = ints2octs([0x30]) + encode_length(len(payload)) + payload
+        try:
+            decoder.decode(payload, _nestingLevel=-1000)
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert False, 'Caller-supplied _nestingLevel lifted the limit'
+
+    def testCallerCannotRequestRawFragment(self):
+        """A caller-supplied _rawFragment must not change the result type."""
+        value, rest = decoder.decode(
+            ints2octs((4, 2, 0x41, 0x42)), _rawFragment=True)
+        assert isinstance(value, univ.OctetString)
+        assert rest == null
+
 
 class NonStreamingCompatibilityTestCase(BaseTestCase):
     def setUp(self):

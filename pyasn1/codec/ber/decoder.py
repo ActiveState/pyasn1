@@ -2003,7 +2003,14 @@ class StreamingDecoder(object):
 
     SINGLE_ITEM_DECODER = SingleItemDecoder
 
+    # Decoder-internal options; a caller must not be able to set them
+    # (_nestingLevel would lift the depth limit).
+    INTERNAL_OPTIONS = ('_nestingLevel', '_rawFragment')
+
     def __init__(self, substrate, asn1Spec=None, **options):
+        for option in self.INTERNAL_OPTIONS:
+            options.pop(option, None)
+
         self._singleItemDecoder = self.SINGLE_ITEM_DECODER(**options)
         self._substrate = asSeekableStream(substrate)
         self._asn1Spec = asn1Spec
