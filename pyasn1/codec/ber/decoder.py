@@ -36,8 +36,12 @@ noValue = base.noValue
 SubstrateUnderrunError = error.SubstrateUnderrunError
 
 # Maximum number of octets in a long-form tag ID (20 octets = up to
-# 140-bit tag IDs)
+# 140-bit tag IDs, matching the OID arc limit below)
 MAX_TAG_OCTETS = 20
+
+# Maximum number of continuation octets (high-bit set) allowed per OID arc.
+# 20 octets allows up to 140-bit integers, supporting UUID-based OIDs
+MAX_OID_ARC_CONTINUATION_OCTETS = 20
 
 # Maximum nesting depth of constructed values the decoder will descend into.
 MAX_NESTING_DEPTH = 100
@@ -438,7 +442,14 @@ class ObjectIdentifierPayloadDecoder(AbstractSimplePayloadDecoder):
                 # Construct subid from a number of octets
                 nextSubId = subId
                 subId = 0
+                continuationOctetCount = 0
                 while nextSubId >= 128:
+                    continuationOctetCount += 1
+                    if continuationOctetCount > MAX_OID_ARC_CONTINUATION_OCTETS:
+                        raise error.PyAsn1Error(
+                            'OID arc exceeds maximum continuation octets limit (%d) '
+                            'at position %d' % (MAX_OID_ARC_CONTINUATION_OCTETS, index)
+                        )
                     subId = (subId << 7) + (nextSubId & 0x7F)
                     if index >= substrateLen:
                         raise error.SubstrateUnderrunError(
