@@ -1,5 +1,5 @@
 Revision 0.5.1.post1, released 11-11-2026
----------------------------------------
+-----------------------------------------
 
 ActiveState security release for the Python 2.7 line. Fixes backported
 from pyasn1 0.6.2 to 0.6.5; behaviour is otherwise that of 0.5.1.
@@ -18,7 +18,8 @@ from pyasn1 0.6.2 to 0.6.5; behaviour is otherwise that of 0.5.1.
 - CVE-2026-119195 (GHSA-9m75-vc3g-4x39): Constructed OCTET STRING,
   character-string and indefinite-length ANY values are reassembled in
   linear time; nested constructed OCTET STRING fragments contribute
-  their decoded octets
+  their decoded octets, and a character-string fragment may end inside
+  a multi-octet character
 - CVE-2026-119196 (GHSA-2qm8-x737-gmw5): Constructed BIT STRING values
   are reassembled in linear time
 - CVE-2026-119197 (GHSA-mm57-4v3p-rchx): Binary REAL mantissas are
