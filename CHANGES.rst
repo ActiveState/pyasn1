@@ -1,3 +1,31 @@
+Revision 0.5.1.post1, released 11-11-2026
+---------------------------------------
+
+ActiveState security release for the Python 2.7 line. Fixes backported
+from pyasn1 0.6.2 to 0.6.5; behaviour is otherwise that of 0.5.1.
+
+- CVE-2026-30922 (GHSA-jr27-m4p2-rc6r): Limited decoder nesting depth
+  to 100 to prevent stack exhaustion from deeply nested structures
+- CVE-2026-59884 (GHSA-m4p7-r5rc-7g4j): Limited BER long-form tag IDs
+  to 20 octets; Tag and TagSet repr() no longer fail on huge tag IDs
+- CVE-2026-59885 (GHSA-8ppf-4f7h-5ppj): OBJECT IDENTIFIER values are
+  decoded and encoded in linear time
+- CVE-2026-59886 (GHSA-hm4w-wwcw-mr6r): Real.__float__() no longer
+  materializes huge integers for large base-10 exponents; base-10
+  mantissa normalization uses exact integer arithmetic
+- CVE-2026-119194 (GHSA-fm9c-5rcf-2q5p): Bounded schemaless container
+  type tracking to prevent quadratic CPU use from colliding tag IDs
+- CVE-2026-119195 (GHSA-9m75-vc3g-4x39): Constructed OCTET STRING,
+  character-string and indefinite-length ANY values are reassembled in
+  linear time; nested constructed OCTET STRING fragments contribute
+  their decoded octets
+- CVE-2026-119196 (GHSA-2qm8-x737-gmw5): Constructed BIT STRING values
+  are reassembled in linear time
+- CVE-2026-119197 (GHSA-mm57-4v3p-rchx): Binary REAL mantissas are
+  decoded in linear time
+- Hardening (the OBJECT IDENTIFIER half of CVE-2026-23490,
+  GHSA-63vm-454h-vhhq): Limited OID arcs to 20 continuation octets
+
 Revision 0.5.1, released 20-11-2023
 ---------------------------------------
 
