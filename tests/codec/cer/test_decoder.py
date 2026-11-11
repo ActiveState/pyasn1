@@ -4,6 +4,7 @@
 # Copyright (c) 2005-2020, Ilya Etingof <etingof@gmail.com>
 # License: https://pyasn1.readthedocs.io/en/latest/license.html
 #
+import binascii
 import sys
 import unittest
 
@@ -15,6 +16,7 @@ from pyasn1.type import opentype
 from pyasn1.type import univ
 from pyasn1.codec.cer import decoder
 from pyasn1.compat.octets import ints2octs, str2octs, null
+from pyasn1.codec.cer import encoder
 from pyasn1.error import PyAsn1Error
 
 
@@ -49,6 +51,17 @@ class BitStringDecoderTestCase(BaseTestCase):
             ints2octs((3, 127, 6) + (170,) * 125 + (128,))
         ) == (((1, 0) * 501), null)
 
+    def testChunkedWithIntermediatePadding(self):
+        fragments = b'\x03\x02\x03\x10\x03\x02\x00\xa5'
+        expected = univ.BitString(binValue='0001010100101')
+
+        for substrate in (b'\x23\x08' + fragments,
+                          b'\x23\x80' + fragments + b'\x00\x00'):
+            value, rest = decoder.decode(substrate, asn1Spec=univ.BitString())
+            assert value == expected
+            assert len(value) == len(expected)
+            assert rest == b''
+
     # TODO: test failures on short chunked and long unchunked substrate samples
 
 
@@ -63,7 +76,60 @@ class OctetStringDecoderTestCase(BaseTestCase):
             ints2octs((36, 128, 4, 130, 3, 232) + (81,) * 1000 + (4, 1, 81, 0, 0))
         ) == (str2octs('Q' * 1001), null)
 
+    def testManyFragments(self):
+        fragments = b'\x04\x01A' * 64
+        definite = b'\x24\x81\xc0' + fragments
+        indefinite = b'\x24\x80' + fragments + b'\x00\x00'
+
+        for substrate in (definite, indefinite):
+            value, rest = decoder.decode(substrate, asn1Spec=univ.OctetString())
+            assert value.asOctets() == b'A' * 64
+            assert rest == b''
+
     # TODO: test failures on short chunked and long unchunked substrate samples
+
+
+class LargeTagDecoderTestCase(BaseTestCase):
+    def testExcessiveLongTag(self):
+        # 1 << 140 is the smallest tag ID needing 21 octets, one over the limit
+        excessiveTag = tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 1 << 140)
+        asn1Spec = univ.Integer().subtype(implicitTag=excessiveTag)
+        substrate = encoder.encode(univ.Integer(1).subtype(implicitTag=excessiveTag))
+
+        try:
+            decoder.decode(substrate, asn1Spec=asn1Spec)
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'excessive long tag tolerated'
+
+
+class RealDecoderTestCase(BaseTestCase):
+    def testLargeBinaryRoundTrip(self):
+        substrate = encoder.encode(univ.Real((-1, 2, 76354972)))
+        value, rest = decoder.decode(substrate)
+
+        assert tuple(value) == (-1, 2, 76354972)
+        assert rest == b''
+
+    def testLongBinaryMantissa(self):
+        mantissa = b'\x80' + b'\x01' * 255
+        content = b'\x80\x00' + mantissa
+        substrate = b'\x09\x82\x01\x02' + content
+        value, rest = decoder.decode(substrate)
+
+        assert tuple(value) == (int(binascii.hexlify(mantissa), 16), 2, 0)
+        assert rest == b''
+
+
+class AnyDecoderTestCase(BaseTestCase):
+    def testManyIndefiniteLengthComponents(self):
+        fragments = b'\x04\x01A' * 64
+        substrate = b'\x30\x80' + fragments + b'\x00\x00'
+        value, rest = decoder.decode(substrate, asn1Spec=univ.Any())
+
+        assert value == b'\x30\x80' + fragments
+        assert rest == b''
 
 
 class SequenceDecoderWithUntaggedOpenTypesTestCase(BaseTestCase):
@@ -362,6 +428,30 @@ class SequenceDecoderWithExplicitlyTaggedSetOfOpenTypesTestCase(BaseTestCase):
         assert not r
         assert s[0] == 3
         assert s[1][0] == univ.OctetString(hexValue='02010C')
+
+
+class NestingDepthLimitTestCase(BaseTestCase):
+    """Test CER decoder protection against deeply nested structures."""
+
+    def testIndefLenNesting(self):
+        """Deeply nested indefinite-length SEQUENCEs must raise PyAsn1Error."""
+        payload = b'\x30\x80' * 200
+        try:
+            decoder.decode(payload)
+        except PyAsn1Error:
+            pass
+        else:
+            assert False, 'Deeply nested indef-length SEQUENCEs not rejected'
+
+    def testNoRecursionError(self):
+        """Must raise PyAsn1Error, not RecursionError."""
+        payload = b'\x30\x80' * 50000
+        try:
+            decoder.decode(payload)
+        except PyAsn1Error:
+            pass
+        except RuntimeError:  # RecursionError on Python 3
+            assert False, 'Got RecursionError instead of PyAsn1Error'
 
 
 suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])

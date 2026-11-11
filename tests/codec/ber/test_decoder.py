@@ -4,6 +4,7 @@
 # Copyright (c) 2005-2020, Ilya Etingof <etingof@gmail.com>
 # License: https://pyasn1.readthedocs.io/en/latest/license.html
 #
+import binascii
 import gzip
 import io
 import os
@@ -21,9 +22,19 @@ from pyasn1.type import univ
 from pyasn1.type import char
 from pyasn1.codec import streaming
 from pyasn1.codec.ber import decoder
+from pyasn1.codec.ber import encoder
 from pyasn1.codec.ber import eoo
 from pyasn1.compat.octets import ints2octs, str2octs, null
 from pyasn1 import error
+
+
+def encode_length(length):
+    if length < 128:
+        return ints2octs([length])
+
+    lengthBytes = ints2octs([(length >> (8 * i)) & 0xff
+                             for i in reversed(range((length.bit_length() + 7) // 8))])
+    return ints2octs([0x80 | len(lengthBytes)]) + lengthBytes
 
 
 class LargeTagDecoderTestCase(BaseTestCase):
@@ -32,6 +43,31 @@ class LargeTagDecoderTestCase(BaseTestCase):
 
     def testLongTag(self):
         assert decoder.decode(ints2octs((0x1f, 2, 1, 0)))[0].tagSet == univ.Integer.tagSet
+
+    def testVeryLongTagRoundTrip(self):
+        # (1 << 140) - 1 is the largest tag ID fitting the 20 octet limit
+        for tagId in (1 << 77, (1 << 140) - 1):
+            largeTag = tag.Tag(tag.tagClassContext, tag.tagFormatSimple, tagId)
+            asn1Spec = univ.Integer().subtype(implicitTag=largeTag)
+            value = univ.Integer(1).subtype(implicitTag=largeTag)
+
+            decoded, rest = decoder.decode(encoder.encode(value), asn1Spec=asn1Spec)
+
+            assert rest == b''
+            assert decoded == 1
+
+    def testExcessiveLongTag(self):
+        # 1 << 140 is the smallest tag ID needing 21 octets, one over the limit
+        excessiveTag = tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 1 << 140)
+        asn1Spec = univ.Integer().subtype(implicitTag=excessiveTag)
+        substrate = encoder.encode(univ.Integer(1).subtype(implicitTag=excessiveTag))
+
+        try:
+            decoder.decode(substrate, asn1Spec=asn1Spec)
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert 0, 'excessive long tag tolerated'
 
     def testTagsEquivalence(self):
         integer = univ.Integer(2).subtype(implicitTag=tag.Tag(tag.tagClassContext, 0, 0))
@@ -135,6 +171,27 @@ class BitStringDecoderTestCase(BaseTestCase):
             ints2octs((35, 128, 3, 2, 0, 169, 3, 2, 1, 138, 0, 0))
         ) == ((1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1), null)
 
+    def testChunkedWithIntermediatePadding(self):
+        fragments = (b'\x03\x02\x03\x10' + b'\x03\x01\x00' +
+                     b'\x03\x02\x05\xa0' + b'\x03\x02\x01\x81')
+        expected = univ.BitString(binValue='000101011000000')
+
+        for substrate in (b'\x23' + encode_length(len(fragments)) + fragments,
+                          b'\x23\x80' + fragments + b'\x00\x00'):
+            for asn1Spec in (None, univ.BitString()):
+                value, rest = decoder.decode(substrate, asn1Spec=asn1Spec)
+                assert value == expected
+                assert len(value) == len(expected)
+                assert rest == b''
+
+    def testManyDefModeFragments(self):
+        fragments = b'\x03\x02\x00\x81' * 256
+        substrate = b'\x23' + encode_length(len(fragments)) + fragments
+        value, rest = decoder.decode(substrate)
+
+        assert value == univ.BitString.fromOctetString(b'\x81' * 256)
+        assert rest == b''
+
     def testDefModeChunkedSubst(self):
         assert decoder.decode(
             ints2octs((35, 8, 3, 2, 0, 169, 3, 2, 1, 138)),
@@ -189,6 +246,32 @@ class OctetStringDecoderTestCase(BaseTestCase):
         assert decoder.decode(
             ints2octs((36, 128, 4, 4, 81, 117, 105, 99, 4, 4, 107, 32, 98, 114, 4, 4, 111, 119, 110, 32, 4, 3, 102, 111, 120, 0, 0))
         ) == (str2octs('Quick brown fox'), null)
+
+    def testManyFragments(self):
+        fragments = b'\x04\x02AB' * 256
+
+        for substrate in (b'\x24' + encode_length(len(fragments)) + fragments,
+                          b'\x24\x80' + fragments + b'\x00\x00'):
+            for asn1Spec in (None, univ.OctetString()):
+                value, rest = decoder.decode(substrate, asn1Spec=asn1Spec)
+                assert value.asOctets() == b'AB' * 256
+                assert rest == b''
+
+    def testNestedIndefModeChunked(self):
+        substrate = binascii.unhexlify('24 07 24 80 04 01 41 00 00'.replace(' ', ''))
+
+        for asn1Spec in (None, univ.OctetString()):
+            value, rest = decoder.decode(substrate, asn1Spec=asn1Spec)
+            assert value.asOctets() == b'A'
+            assert rest == b''
+
+    def testNestedDefModeChunked(self):
+        substrate = binascii.unhexlify('24 05 24 03 04 01 41'.replace(' ', ''))
+
+        for asn1Spec in (None, univ.OctetString()):
+            value, rest = decoder.decode(substrate, asn1Spec=asn1Spec)
+            assert value.asOctets() == b'A'
+            assert rest == b''
 
     def testDefModeChunkedSubst(self):
         assert decoder.decode(
@@ -450,6 +533,84 @@ class ObjectIdentifierDecoderTestCase(BaseTestCase):
             ints2octs((0x06, 0x13, 0x88, 0x37, 0x83, 0xC6, 0xDF, 0xD4, 0xCC, 0xB3, 0xFF, 0xFF, 0xFE, 0xF0, 0xB8, 0xD6, 0xB8, 0xCB, 0xE2, 0xB6, 0x47))
         ) == ((2, 999, 18446744073709551535184467440737095), null)
 
+    def testManySingleByteArcs(self):
+        encodedArcCount = 4096
+        substrate = (
+            ints2octs([0x06]) +
+            encode_length(encodedArcCount) +
+            ints2octs([0x01] * encodedArcCount)
+        )
+
+        value, rest = decoder.decode(substrate)
+        assert rest == null
+        assert len(value) == encodedArcCount + 1
+        assert tuple(value[:3]) == (0, 1, 1)
+        assert tuple(value[-3:]) == (1, 1, 1)
+
+    def testExcessiveContinuationOctets(self):
+        """Test that OID arcs with excessive continuation octets are rejected."""
+        # Create a payload with 25 continuation octets (exceeds 20 limit)
+        # 0x81 bytes are continuation octets, 0x01 terminates
+        malicious_payload = ints2octs([0x06, 26]) + ints2octs([0x81] * 25) + ints2octs([0x01])
+        try:
+            decoder.decode(malicious_payload)
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert 0, 'Excessive continuation octets tolerated'
+
+    def testMaxAllowedContinuationOctets(self):
+        """Test that OID arcs at the maximum continuation octets limit work."""
+        # Create a payload with exactly 20 continuation octets (at limit)
+        # This should succeed
+        payload = ints2octs([0x06, 21]) + ints2octs([0x81] * 20) + ints2octs([0x01])
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error:
+            assert 0, 'Valid OID with 20 continuation octets rejected'
+
+    def testOneOverContinuationLimit(self):
+        """Test boundary: 21 continuation octets (one over limit) is rejected."""
+        payload = ints2octs([0x06, 22]) + ints2octs([0x81] * 21) + ints2octs([0x01])
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert 0, '21 continuation octets tolerated (should be rejected)'
+
+    def testExcessiveContinuationInSecondArc(self):
+        """Test that limit applies to subsequent arcs, not just the first."""
+        # First arc: valid simple byte (0x55 = 85, decodes to arc 2.5)
+        # Second arc: excessive continuation octets
+        payload = ints2octs([0x06, 27]) + ints2octs([0x55]) + ints2octs([0x81] * 25) + ints2octs([0x01])
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert 0, 'Excessive continuation in second arc tolerated'
+
+    def testMultipleArcsAtLimit(self):
+        """Test multiple arcs each at the continuation limit work correctly."""
+        # Two arcs, each with 20 continuation octets (both at limit)
+        arc1 = ints2octs([0x81] * 20) + ints2octs([0x01])  # 21 bytes
+        arc2 = ints2octs([0x81] * 20) + ints2octs([0x01])  # 21 bytes
+        payload = ints2octs([0x06, 42]) + arc1 + arc2
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error:
+            assert 0, 'Multiple valid arcs at limit rejected'
+
+    def testExcessiveContinuationWithMaxBytes(self):
+        """Test with 0xFF continuation bytes (maximum value, not just 0x81)."""
+        # 0xFF bytes are also continuation octets (high bit set)
+        malicious_payload = ints2octs([0x06, 26]) + ints2octs([0xFF] * 25) + ints2octs([0x01])
+        try:
+            decoder.decode(malicious_payload)
+        except error.PyAsn1Error:
+            pass
+
 
 class RealDecoderTestCase(BaseTestCase):
     def testChar(self):
@@ -482,17 +643,61 @@ class RealDecoderTestCase(BaseTestCase):
             ints2octs((9, 4, 161, 255, 1, 3))
         ) == (univ.Real((3, 2, -1020)), null)
 
-# TODO: this requires Real type comparison fix
+    def testBin6(self):  # large exponent, base = 16
+        value, rest = decoder.decode(
+            ints2octs((9, 5, 162, 0, 255, 255, 1))
+        )
 
-#    def testBin6(self):
-#        assert decoder.decode(
-#            ints2octs((9, 5, 162, 0, 255, 255, 1))
-#        ) == (univ.Real((1, 2, 262140)), null)
+        assert tuple(value) == (1, 2, 262140)
+        assert rest == b''
 
-#    def testBin7(self):
-#        assert decoder.decode(
-#            ints2octs((9, 7, 227, 4, 1, 35, 69, 103, 1))
-#        ) == (univ.Real((-1, 2, 76354972)), null)
+    def testBin7(self):  # large exponent in 4-octet form, base = 16
+        value, rest = decoder.decode(
+            ints2octs((9, 7, 227, 4, 1, 35, 69, 103, 1))
+        )
+
+        assert tuple(value) == (-1, 2, 76354972)
+        assert rest == b''
+
+    def testLargeBinaryRoundTrip(self):
+        substrate = encoder.encode(univ.Real((-1, 2, 76354972)))
+        value, rest = decoder.decode(substrate)
+
+        assert tuple(value) == (-1, 2, 76354972)
+        assert rest == b''
+
+    def testLongBinaryMantissa(self):
+        mantissa = b'\x80' + b'\x01' * 511
+        content = b'\x80\x00' + mantissa
+        substrate = b'\x09' + encode_length(len(content)) + content
+
+        for asn1Spec in (None, univ.Real()):
+            value, rest = decoder.decode(substrate, asn1Spec=asn1Spec)
+            assert tuple(value) == (int(binascii.hexlify(mantissa), 16), 2, 0)
+            assert rest == b''
+
+    def testLongFormBinaryRealExponentLength(self):
+        value, rest = decoder.decode(
+            ints2octs((9, 6, 0x83, 3, 0x0f, 0x42, 0x40, 1))
+        )
+
+        assert tuple(value) == (1, 2, 1000000)
+        assert rest == b''
+
+    def testLargeBinaryPrettyPrintOverflow(self):
+        value, rest = decoder.decode(
+            b'\t\t\xeb\x060662.666\xd0B\x00\x00\x00\x00\x00\x00\x00'
+        )
+
+        assert value.prettyPrint() == '<overflow>'
+        assert rest == b'6\xd0B\x00\x00\x00\x00\x00\x00\x00'
+
+        try:
+            float(value)
+        except OverflowError:
+            pass
+        else:
+            assert 0, '__float__() tolerated overflow'
 
     def testPlusInf(self):
         assert decoder.decode(
@@ -535,10 +740,46 @@ class BMPStringDecoderTestCase(BaseTestCase):
     def testDecoder(self):
         assert decoder.decode(ints2octs((30, 6, 0, 97, 0, 98, 0, 99))) == (char.BMPString(sys.version_info[0] >= 3 and 'abc' or unicode('abc')), null)
 
+    def testChunkedSplitCodeUnit(self):
+        # Constructed form whose fragment boundary splits a UTF-16 code unit
+        for substrate in (
+                (62, 6, 30, 1, 0, 30, 1, 97),
+                (62, 128, 30, 1, 0, 30, 1, 97, 0, 0)):
+            for asn1Spec in (None, char.BMPString()):
+                value, rest = decoder.decode(ints2octs(substrate), asn1Spec=asn1Spec)
+                assert value == char.BMPString(u'a')
+                assert rest == null
+
 
 class UTF8StringDecoderTestCase(BaseTestCase):
     def testDecoder(self):
         assert decoder.decode(ints2octs((12, 3, 97, 98, 99))) == (char.UTF8String(sys.version_info[0] >= 3 and 'abc' or unicode('abc')), null)
+
+    def testChunkedSplitCodePoint(self):
+        # Constructed form whose fragment boundary splits a two-octet
+        # UTF-8 sequence, as a CER encoder chunking at 1000 octets may
+        for substrate in (
+                (44, 6, 12, 1, 0xc3, 12, 1, 0xa9),
+                (44, 128, 12, 1, 0xc3, 12, 1, 0xa9, 0, 0)):
+            for asn1Spec in (None, char.UTF8String()):
+                value, rest = decoder.decode(ints2octs(substrate), asn1Spec=asn1Spec)
+                assert value == char.UTF8String(u'\u00e9')
+                assert rest == null
+
+    def testNestedChunkedSplitCodePoint(self):
+        substrate = ints2octs((44, 8, 44, 6, 12, 1, 0xc3, 12, 1, 0xa9))
+        for asn1Spec in (None, char.UTF8String()):
+            value, rest = decoder.decode(substrate, asn1Spec=asn1Spec)
+            assert value == char.UTF8String(u'\u00e9')
+            assert rest == null
+
+    def testImplicitlyTaggedChunkedSplitCodePoint(self):
+        asn1Spec = char.UTF8String().subtype(
+            implicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 0))
+        substrate = ints2octs((0xa0, 6, 12, 1, 0xc3, 12, 1, 0xa9))
+        value, rest = decoder.decode(substrate, asn1Spec=asn1Spec)
+        assert value == asn1Spec.clone(u'\u00e9')
+        assert rest == null
 
 
 class SequenceOfDecoderTestCase(BaseTestCase):
@@ -1551,6 +1792,14 @@ class AnyDecoderTestCase(BaseTestCase):
             ints2octs((4, 3, 102, 111, 120)), asn1Spec=self.s
         ) == (univ.Any('\004\003fox'), null)
 
+    def testManyIndefiniteLengthComponents(self):
+        fragments = b'\x04\x01A' * 128
+        substrate = b'\x30\x80' + fragments + b'\x00\x00'
+        value, rest = decoder.decode(substrate, asn1Spec=self.s)
+
+        assert value == b'\x30\x80' + fragments
+        assert rest == b''
+
     def testTaggedExIndefMode(self):
         s = univ.Any('\004\003fox').subtype(explicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 4))
         assert decoder.decode(ints2octs((164, 128, 4, 3, 102, 111, 120, 0, 0)), asn1Spec=s) == (s, null)
@@ -1921,6 +2170,144 @@ class CompressedFilesTestCase(BaseTestCase):
                     assert values == [12, (1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1)] * 1000
         finally:
             os.remove(path)
+
+
+class NestingDepthLimitTestCase(BaseTestCase):
+    """Test protection against deeply nested ASN.1 structures (CVE prevention)."""
+
+    def testIndefLenSequenceNesting(self):
+        """Deeply nested indefinite-length SEQUENCEs must raise PyAsn1Error."""
+        # Each \x30\x80 opens a new indefinite-length SEQUENCE
+        payload = b'\x30\x80' * 200
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert False, 'Deeply nested indef-length SEQUENCEs not rejected'
+
+    def testIndefLenSetNesting(self):
+        """Deeply nested indefinite-length SETs must raise PyAsn1Error."""
+        # Each \x31\x80 opens a new indefinite-length SET
+        payload = b'\x31\x80' * 200
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert False, 'Deeply nested indef-length SETs not rejected'
+
+    def testDefiniteLenNesting(self):
+        """Deeply nested definite-length SEQUENCEs must raise PyAsn1Error."""
+        inner = b'\x05\x00'  # NULL
+        for _ in range(200):
+            length = len(inner)
+            if length < 128:
+                inner = b'\x30' + ints2octs([length]) + inner
+            else:
+                length_bytes = ints2octs([(length >> (8 * i)) & 0xff
+                     for i in reversed(range((length.bit_length() + 7) // 8))])
+                inner = b'\x30' + ints2octs([0x80 | len(length_bytes)]) + \
+                    length_bytes + inner
+        try:
+            decoder.decode(inner)
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert False, 'Deeply nested definite-length SEQUENCEs not rejected'
+
+    def testNestingUnderLimitWorks(self):
+        """Nesting within the limit must decode successfully."""
+        inner = b'\x05\x00'  # NULL
+        for _ in range(50):
+            length = len(inner)
+            if length < 128:
+                inner = b'\x30' + ints2octs([length]) + inner
+            else:
+                length_bytes = ints2octs([(length >> (8 * i)) & 0xff
+                     for i in reversed(range((length.bit_length() + 7) // 8))])
+                inner = b'\x30' + ints2octs([0x80 | len(length_bytes)]) + \
+                    length_bytes + inner
+        asn1Object, _ = decoder.decode(inner)
+        assert asn1Object is not None, 'Valid nested structure rejected'
+
+    def testSiblingsDontIncreaseDepth(self):
+        """Sibling elements at the same level must not inflate depth count."""
+        # SEQUENCE containing 200 INTEGER siblings - should decode fine
+        components = b'\x02\x01\x01' * 200  # 200 x INTEGER(1)
+        length = len(components)
+        length_bytes = ints2octs([(length >> (8 * i)) & 0xff
+                     for i in reversed(range((length.bit_length() + 7) // 8))])
+        payload = b'\x30' + ints2octs([0x80 | len(length_bytes)]) + \
+            length_bytes + components
+        asn1Object, _ = decoder.decode(payload)
+        assert asn1Object is not None, 'Siblings incorrectly rejected'
+
+    def testErrorMessageContainsLimit(self):
+        """Error message must indicate the nesting depth limit."""
+        payload = b'\x30\x80' * 200
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error as exc:
+            # Python 2 leaves exc.args empty: PyAsn1Error keeps them in _args
+            message = ' '.join(str(a) for a in exc._args)
+            assert 'nesting depth' in message.lower(), \
+                'Error message missing depth info: %s' % message
+        else:
+            assert False, 'Expected PyAsn1Error'
+
+    def testNoRecursionError(self):
+        """Must raise PyAsn1Error, not RecursionError."""
+        payload = b'\x30\x80' * 50000
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error:
+            pass
+        except RuntimeError:  # RecursionError on Python 3
+            assert False, 'Got RecursionError instead of PyAsn1Error'
+
+    def testMixedNesting(self):
+        """Mixed SEQUENCE and SET nesting must be caught."""
+        # Alternate SEQUENCE (0x30) and SET (0x31) with indef length
+        payload = b''
+        for i in range(200):
+            payload += b'\x30\x80' if i % 2 == 0 else b'\x31\x80'
+        try:
+            decoder.decode(payload)
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert False, 'Mixed nesting not rejected'
+
+    def testWithSchema(self):
+        """Deeply nested structures must be caught even with schema."""
+        payload = b'\x30\x80' * 200
+        try:
+            decoder.decode(payload, asn1Spec=univ.Sequence())
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert False, 'Deeply nested with schema not rejected'
+
+    def testCallerCannotLiftLimit(self):
+        """A caller-supplied _nestingLevel must not disable the limit."""
+        # 150 well-formed nested SEQUENCEs: decodes only if the limit is off
+        payload = ints2octs((5, 0))
+        for _ in range(150):
+            payload = ints2octs([0x30]) + encode_length(len(payload)) + payload
+        try:
+            decoder.decode(payload, _nestingLevel=-1000)
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert False, 'Caller-supplied _nestingLevel lifted the limit'
+
+    def testCallerCannotRequestRawFragment(self):
+        """A caller-supplied _rawFragment must not change the result type."""
+        value, rest = decoder.decode(
+            ints2octs((4, 2, 0x41, 0x42)), _rawFragment=True)
+        assert isinstance(value, univ.OctetString)
+        assert rest == null
 
 
 class NonStreamingCompatibilityTestCase(BaseTestCase):

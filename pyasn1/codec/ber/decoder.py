@@ -35,6 +35,17 @@ noValue = base.noValue
 
 SubstrateUnderrunError = error.SubstrateUnderrunError
 
+# Maximum number of octets in a long-form tag ID (20 octets = up to
+# 140-bit tag IDs, matching the OID arc limit below)
+MAX_TAG_OCTETS = 20
+
+# Maximum number of continuation octets (high-bit set) allowed per OID arc.
+# 20 octets allows up to 140-bit integers, supporting UUID-based OIDs
+MAX_OID_ARC_CONTINUATION_OCTETS = 20
+
+# Maximum nesting depth of constructed values the decoder will descend into.
+MAX_NESTING_DEPTH = 100
+
 
 class AbstractPayloadDecoder(object):
     protoComponent = None
@@ -164,6 +175,45 @@ class BitStringPayloadDecoder(AbstractSimplePayloadDecoder):
     protoComponent = univ.BitString(())
     supportConstructedForm = True
 
+    @staticmethod
+    def _appendFragment(assembled, component, bitLength):
+        component = octs2ints(component)
+        trailingBits = component[0]
+        if trailingBits > 7:
+            raise error.PyAsn1Error(
+                'Trailing bits overflow %s' % trailingBits
+            )
+
+        payload = component[1:]
+        if not payload:
+            if trailingBits:
+                raise error.PyAsn1Error('Trailing bits overflow %s' % trailingBits)
+            return bitLength
+
+        if not trailingBits and not bitLength % 8:
+            assembled.extend(payload)
+            return bitLength + len(payload) * 8
+
+        for idx, byte in enumerate(payload):
+            significantBits = 8
+            if idx == len(payload) - 1:
+                significantBits -= trailingBits
+                byte >>= trailingBits
+
+            usedBits = bitLength % 8
+            if not usedBits:
+                assembled.append(byte << (8 - significantBits))
+            elif usedBits + significantBits <= 8:
+                assembled[-1] |= byte << (8 - usedBits - significantBits)
+            else:
+                remainingBits = usedBits + significantBits - 8
+                assembled[-1] |= byte >> remainingBits
+                assembled.append((byte << (8 - remainingBits)) & 0xff)
+
+            bitLength += significantBits
+
+        return bitLength
+
     def valueDecoder(self, substrate, asn1Spec,
                      tagSet=None, length=None, state=None,
                      decodeFun=None, substrateFun=None,
@@ -220,7 +270,8 @@ class BitStringPayloadDecoder(AbstractSimplePayloadDecoder):
         # All inner fragments are of the same type, treat them as octet string
         substrateFun = self.substrateCollector
 
-        bitString = self.protoComponent.fromOctetString(null, internalFormat=True)
+        assembled = bytearray()
+        bitLength = 0
 
         current_position = substrate.tell()
 
@@ -231,16 +282,11 @@ class BitStringPayloadDecoder(AbstractSimplePayloadDecoder):
                 if isinstance(component, SubstrateUnderrunError):
                     yield component
 
-            trailingBits = oct2int(component[0])
-            if trailingBits > 7:
-                raise error.PyAsn1Error(
-                    'Trailing bits overflow %s' % trailingBits
-                )
+            bitLength = self._appendFragment(assembled, component, bitLength)
 
-            bitString = self.protoComponent.fromOctetString(
-                component[1:], internalFormat=True,
-                prepend=bitString, padding=trailingBits
-            )
+        bitString = self.protoComponent.fromOctetString(
+            bytes(assembled), internalFormat=True, padding=(-bitLength) % 8
+        )
 
         yield self._createComponent(asn1Spec, tagSet, bitString, **options)
 
@@ -260,7 +306,8 @@ class BitStringPayloadDecoder(AbstractSimplePayloadDecoder):
         # All inner fragments are of the same type, treat them as octet string
         substrateFun = self.substrateCollector
 
-        bitString = self.protoComponent.fromOctetString(null, internalFormat=True)
+        assembled = bytearray()
+        bitLength = 0
 
         while True:  # loop over fragments
 
@@ -277,16 +324,11 @@ class BitStringPayloadDecoder(AbstractSimplePayloadDecoder):
             if component is eoo.endOfOctets:
                 break
 
-            trailingBits = oct2int(component[0])
-            if trailingBits > 7:
-                raise error.PyAsn1Error(
-                    'Trailing bits overflow %s' % trailingBits
-                )
+            bitLength = self._appendFragment(assembled, component, bitLength)
 
-            bitString = self.protoComponent.fromOctetString(
-                component[1:], internalFormat=True,
-                prepend=bitString, padding=trailingBits
-            )
+        bitString = self.protoComponent.fromOctetString(
+            bytes(assembled), internalFormat=True, padding=(-bitLength) % 8
+        )
 
         yield self._createComponent(asn1Spec, tagSet, bitString, **options)
 
@@ -307,12 +349,21 @@ class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
 
             return
 
+        # A fragment of a constructed string yields its raw octets: a
+        # character string fragment may end inside a multi-octet character,
+        # so only the reassembled value can be decoded.
+        rawFragment = options.pop('_rawFragment', False)
+
         if tagSet[0].tagFormat == tag.tagFormatSimple:  # XXX what tag to check?
             for chunk in readFromStream(substrate, length, options):
                 if isinstance(chunk, SubstrateUnderrunError):
                     yield chunk
 
-            yield self._createComponent(asn1Spec, tagSet, chunk, **options)
+            if rawFragment:
+                yield chunk
+
+            else:
+                yield self._createComponent(asn1Spec, tagSet, chunk, **options)
 
             return
 
@@ -322,23 +373,25 @@ class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
         if LOG:
             LOG('assembling constructed serialization')
 
-        # All inner fragments are of the same type, treat them as octet string
-        substrateFun = self.substrateCollector
-
-        header = null
+        # Assemble the logical value of each fragment, including nested ones.
+        fragments = []
 
         original_position = substrate.tell()
         # head = popSubstream(substrate, length)
         while substrate.tell() - original_position < length:
             for component in decodeFun(
-                    substrate, self.protoComponent, substrateFun=substrateFun,
+                    substrate, self.protoComponent, _rawFragment=True,
                     **options):
                 if isinstance(component, SubstrateUnderrunError):
                     yield component
 
-            header += component
+            fragments.append(component)
 
-        yield self._createComponent(asn1Spec, tagSet, header, **options)
+        if rawFragment:
+            yield null.join(fragments)
+
+        else:
+            yield self._createComponent(asn1Spec, tagSet, null.join(fragments), **options)
 
     def indefLenValueDecoder(self, substrate, asn1Spec,
                              tagSet=None, length=None, state=None,
@@ -352,16 +405,16 @@ class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
 
             return
 
-        # All inner fragments are of the same type, treat them as octet string
-        substrateFun = self.substrateCollector
+        rawFragment = options.pop('_rawFragment', False)
 
-        header = null
+        # Assemble the logical value of each fragment, including nested ones.
+        fragments = []
 
         while True:  # loop over fragments
 
             for component in decodeFun(
-                    substrate, self.protoComponent, substrateFun=substrateFun,
-                    allowEoo=True, **options):
+                    substrate, self.protoComponent, allowEoo=True,
+                    _rawFragment=True, **options):
 
                 if isinstance(component, SubstrateUnderrunError):
                     yield component
@@ -372,9 +425,13 @@ class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
             if component is eoo.endOfOctets:
                 break
 
-            header += component
+            fragments.append(component)
 
-        yield self._createComponent(asn1Spec, tagSet, header, **options)
+        if rawFragment:
+            yield null.join(fragments)
+
+        else:
+            yield self._createComponent(asn1Spec, tagSet, null.join(fragments), **options)
 
 
 class NullPayloadDecoder(AbstractSimplePayloadDecoder):
@@ -419,27 +476,34 @@ class ObjectIdentifierPayloadDecoder(AbstractSimplePayloadDecoder):
 
         chunk = octs2ints(chunk)
 
-        oid = ()
+        oid = []
         index = 0
         substrateLen = len(chunk)
         while index < substrateLen:
             subId = chunk[index]
             index += 1
             if subId < 128:
-                oid += (subId,)
+                oid.append(subId)
             elif subId > 128:
                 # Construct subid from a number of octets
                 nextSubId = subId
                 subId = 0
+                continuationOctetCount = 0
                 while nextSubId >= 128:
+                    continuationOctetCount += 1
+                    if continuationOctetCount > MAX_OID_ARC_CONTINUATION_OCTETS:
+                        raise error.PyAsn1Error(
+                            'OID arc exceeds maximum continuation octets limit (%d) '
+                            'at position %d' % (MAX_OID_ARC_CONTINUATION_OCTETS, index)
+                        )
                     subId = (subId << 7) + (nextSubId & 0x7F)
                     if index >= substrateLen:
                         raise error.SubstrateUnderrunError(
-                            'Short substrate for sub-OID past %s' % (oid,)
+                            'Short substrate for sub-OID past %s' % (tuple(oid),)
                         )
                     nextSubId = chunk[index]
                     index += 1
-                oid += ((subId << 7) + nextSubId,)
+                oid.append((subId << 7) + nextSubId)
             elif subId == 128:
                 # ASN.1 spec forbids leading zeros (0x80) in OID
                 # encoding, tolerating it opens a vulnerability. See
@@ -449,15 +513,17 @@ class ObjectIdentifierPayloadDecoder(AbstractSimplePayloadDecoder):
 
         # Decode two leading arcs
         if 0 <= oid[0] <= 39:
-            oid = (0,) + oid
+            oid.insert(0, 0)
         elif 40 <= oid[0] <= 79:
-            oid = (1, oid[0] - 40) + oid[1:]
+            oid[0] -= 40
+            oid.insert(0, 1)
         elif oid[0] >= 80:
-            oid = (2, oid[0] - 80) + oid[1:]
+            oid[0] -= 80
+            oid.insert(0, 2)
         else:
             raise error.PyAsn1Error('Malformed first OID octet: %s' % chunk[0])
 
-        yield self._createComponent(asn1Spec, tagSet, oid, **options)
+        yield self._createComponent(asn1Spec, tagSet, tuple(oid), **options)
 
 
 class RealPayloadDecoder(AbstractSimplePayloadDecoder):
@@ -515,12 +581,7 @@ class RealPayloadDecoder(AbstractSimplePayloadDecoder):
 
             elif b == 2:  # encbase = 16
                 e *= 4
-            p = 0
-
-            while chunk:  # value
-                p <<= 8
-                p |= oct2int(chunk[0])
-                chunk = chunk[1:]
+            p = from_bytes(chunk)  # value
 
             if fo & 0x40:  # sign bit
                 p = -p
@@ -604,7 +665,10 @@ class ConstructedPayloadDecoderBase(AbstractConstructedPayloadDecoder):
                 break
 
             components.append(component)
-            componentTypes.add(component.tagSet)
+            # Two distinct types settle the choice; keep the set bounded
+            # to avoid quadratic comparisons for colliding tag hashes.
+            if len(componentTypes) < 2:
+                componentTypes.add(component.tagSet)
 
             # Now we have to guess is it SEQUENCE/SET or SEQUENCE OF/SET OF
             # The heuristics is:
@@ -1332,6 +1396,8 @@ class AnyPayloadDecoder(AbstractSimplePayloadDecoder):
         # All inner fragments are of the same type, treat them as octet string
         substrateFun = self.substrateCollector
 
+        fragments = [chunk]
+
         while True:  # loop over fragments
 
             for component in decodeFun(
@@ -1347,7 +1413,9 @@ class AnyPayloadDecoder(AbstractSimplePayloadDecoder):
             if component is eoo.endOfOctets:
                 break
 
-            chunk += component
+            fragments.append(component)
+
+        chunk = null.join(fragments)
 
         if substrateFun:
             yield chunk  # TODO: Weird
@@ -1504,6 +1572,15 @@ class SingleItemDecoder(object):
                  decodeFun=None, substrateFun=None,
                  **options):
 
+        _nestingLevel = options.get('_nestingLevel', 0)
+
+        if _nestingLevel > MAX_NESTING_DEPTH:
+            raise error.PyAsn1Error(
+                'ASN.1 structure nesting depth exceeds limit (%d)' % MAX_NESTING_DEPTH
+            )
+
+        options['_nestingLevel'] = _nestingLevel + 1
+
         allowEoo = options.pop('allowEoo', False)
 
         if LOG:
@@ -1559,7 +1636,7 @@ class SingleItemDecoder(object):
 
                     if tagId == 0x1F:
                         isShortTag = False
-                        lengthOctetIdx = 0
+                        tagOctetCount = 0
                         tagId = 0
 
                         while True:
@@ -1573,7 +1650,12 @@ class SingleItemDecoder(object):
                                 )
 
                             integerTag = ord(integerByte)
-                            lengthOctetIdx += 1
+                            tagOctetCount += 1
+                            if tagOctetCount > MAX_TAG_OCTETS:
+                                raise error.PyAsn1Error(
+                                    'Tag ID octet count exceeds limit (%d)' % (
+                                        MAX_TAG_OCTETS,)
+                                )
                             tagId <<= 7
                             tagId |= (integerTag & 0x7F)
 
@@ -1921,7 +2003,14 @@ class StreamingDecoder(object):
 
     SINGLE_ITEM_DECODER = SingleItemDecoder
 
+    # Decoder-internal options; a caller must not be able to set them
+    # (_nestingLevel would lift the depth limit).
+    INTERNAL_OPTIONS = ('_nestingLevel', '_rawFragment')
+
     def __init__(self, substrate, asn1Spec=None, **options):
+        for option in self.INTERNAL_OPTIONS:
+            options.pop(option, None)
+
         self._singleItemDecoder = self.SINGLE_ITEM_DECODER(**options)
         self._substrate = asSeekableStream(substrate)
         self._asn1Spec = asn1Spec
