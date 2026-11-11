@@ -27,6 +27,15 @@ from pyasn1.compat.octets import ints2octs, str2octs, null
 from pyasn1 import error
 
 
+def encode_length(length):
+    if length < 128:
+        return ints2octs([length])
+
+    lengthBytes = ints2octs([(length >> (8 * i)) & 0xff
+                             for i in reversed(range((length.bit_length() + 7) // 8))])
+    return ints2octs([0x80 | len(lengthBytes)]) + lengthBytes
+
+
 class LargeTagDecoderTestCase(BaseTestCase):
     def testLargeTag(self):
         assert decoder.decode(ints2octs((127, 141, 245, 182, 253, 47, 3, 2, 1, 1))) == (1, null)
@@ -475,6 +484,20 @@ class ObjectIdentifierDecoderTestCase(BaseTestCase):
         assert decoder.decode(
             ints2octs((0x06, 0x13, 0x88, 0x37, 0x83, 0xC6, 0xDF, 0xD4, 0xCC, 0xB3, 0xFF, 0xFF, 0xFE, 0xF0, 0xB8, 0xD6, 0xB8, 0xCB, 0xE2, 0xB6, 0x47))
         ) == ((2, 999, 18446744073709551535184467440737095), null)
+
+    def testManySingleByteArcs(self):
+        encodedArcCount = 4096
+        substrate = (
+            ints2octs([0x06]) +
+            encode_length(encodedArcCount) +
+            ints2octs([0x01] * encodedArcCount)
+        )
+
+        value, rest = decoder.decode(substrate)
+        assert rest == null
+        assert len(value) == encodedArcCount + 1
+        assert tuple(value[:3]) == (0, 1, 1)
+        assert tuple(value[-3:]) == (1, 1, 1)
 
 
 class RealDecoderTestCase(BaseTestCase):

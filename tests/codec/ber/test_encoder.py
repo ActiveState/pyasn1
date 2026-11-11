@@ -349,6 +349,16 @@ class ObjectIdentifierEncoderTestCase(BaseTestCase):
         ) == ints2octs((0x06, 0x13, 0x88, 0x37, 0x83, 0xC6, 0xDF, 0xD4, 0xCC, 0xB3, 0xFF, 0xFF, 0xFE, 0xF0, 0xB8, 0xD6,
                         0xB8, 0xCB, 0xE2, 0xB6, 0x47))
 
+    def testManySingleByteArcs(self):
+        arcCount = 4096
+        substrate = encoder.encode(
+            univ.ObjectIdentifier((1, 3) + (1,) * arcCount)
+        )
+
+        assert substrate == (
+            ints2octs([0x06, 0x82, 0x10, 0x01, 0x2B]) + ints2octs([0x01] * arcCount)
+        )
+
 
 class ObjectIdentifierWithSchemaEncoderTestCase(BaseTestCase):
     def testOne(self):
