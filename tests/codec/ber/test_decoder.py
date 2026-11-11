@@ -740,10 +740,46 @@ class BMPStringDecoderTestCase(BaseTestCase):
     def testDecoder(self):
         assert decoder.decode(ints2octs((30, 6, 0, 97, 0, 98, 0, 99))) == (char.BMPString(sys.version_info[0] >= 3 and 'abc' or unicode('abc')), null)
 
+    def testChunkedSplitCodeUnit(self):
+        # Constructed form whose fragment boundary splits a UTF-16 code unit
+        for substrate in (
+                (62, 6, 30, 1, 0, 30, 1, 97),
+                (62, 128, 30, 1, 0, 30, 1, 97, 0, 0)):
+            for asn1Spec in (None, char.BMPString()):
+                value, rest = decoder.decode(ints2octs(substrate), asn1Spec=asn1Spec)
+                assert value == char.BMPString(u'a')
+                assert rest == null
+
 
 class UTF8StringDecoderTestCase(BaseTestCase):
     def testDecoder(self):
         assert decoder.decode(ints2octs((12, 3, 97, 98, 99))) == (char.UTF8String(sys.version_info[0] >= 3 and 'abc' or unicode('abc')), null)
+
+    def testChunkedSplitCodePoint(self):
+        # Constructed form whose fragment boundary splits a two-octet
+        # UTF-8 sequence, as a CER encoder chunking at 1000 octets may
+        for substrate in (
+                (44, 6, 12, 1, 0xc3, 12, 1, 0xa9),
+                (44, 128, 12, 1, 0xc3, 12, 1, 0xa9, 0, 0)):
+            for asn1Spec in (None, char.UTF8String()):
+                value, rest = decoder.decode(ints2octs(substrate), asn1Spec=asn1Spec)
+                assert value == char.UTF8String(u'\u00e9')
+                assert rest == null
+
+    def testNestedChunkedSplitCodePoint(self):
+        substrate = ints2octs((44, 8, 44, 6, 12, 1, 0xc3, 12, 1, 0xa9))
+        for asn1Spec in (None, char.UTF8String()):
+            value, rest = decoder.decode(substrate, asn1Spec=asn1Spec)
+            assert value == char.UTF8String(u'\u00e9')
+            assert rest == null
+
+    def testImplicitlyTaggedChunkedSplitCodePoint(self):
+        asn1Spec = char.UTF8String().subtype(
+            implicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 0))
+        substrate = ints2octs((0xa0, 6, 12, 1, 0xc3, 12, 1, 0xa9))
+        value, rest = decoder.decode(substrate, asn1Spec=asn1Spec)
+        assert value == asn1Spec.clone(u'\u00e9')
+        assert rest == null
 
 
 class SequenceOfDecoderTestCase(BaseTestCase):
